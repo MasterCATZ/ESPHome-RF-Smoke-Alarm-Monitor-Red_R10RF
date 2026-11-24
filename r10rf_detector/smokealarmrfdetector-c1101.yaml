@@ -9,6 +9,9 @@ substitutions:
   pir_off_delay: "5"
   # PIR on-delay in milliseconds (debounce)
   pir_on_delay: "100"
+  # Full frame capture mode (logs ALL decoded frames with timestamps)
+  # Enable via button in HA, or set to "true" to start capturing on boot
+  capture_all_frames: "false"
 
 esphome:
   name: smokealarmrfdetector-c1101
@@ -24,6 +27,7 @@ esphome:
       - lambda: |-
           r10rf_set_known_codes("${r10rf_known_codes}");
           r10rf_setup();
+          r10rf_capture_all_enable(${capture_all_frames});
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -77,12 +81,28 @@ binary_sensor:
     lambda: |-
       return r10rf_alarm_is_latched() || r10rf_pir_is_latched();
 
+  # Capture all frames mode status
+  - platform: template
+    id: capture_mode_active
+    name: "RF Capture All Frames Active"
+    device_class: running
+    lambda: |-
+      return r10rf_capture_all_enabled();
+
 sensor:
   - platform: template
     id: r10rf_rssi
     name: "R10RF CC1101 RSSI"
     unit_of_measurement: "dBm"
     accuracy_decimals: 0
+
+  - platform: template
+    id: capture_log_count
+    name: "RF Capture Log Entries"
+    unit_of_measurement: "frames"
+    accuracy_decimals: 0
+    lambda: |-
+      return r10rf_capture_log_count();
 
 text_sensor:
   - platform: template
@@ -96,6 +116,23 @@ text_sensor:
   - platform: template
     id: r10rf_last_unknown_frame
     name: "R10RF Last Unknown Frame"
+
+  # Capture log entries (newest first)
+  - platform: template
+    id: capture_log_0
+    name: "RF Capture Log [0] Newest"
+  - platform: template
+    id: capture_log_1
+    name: "RF Capture Log [1]"
+  - platform: template
+    id: capture_log_2
+    name: "RF Capture Log [2]"
+  - platform: template
+    id: capture_log_3
+    name: "RF Capture Log [3]"
+  - platform: template
+    id: capture_log_4
+    name: "RF Capture Log [4]"
 
 light:
   - platform: esp32_rmt_led_strip
@@ -149,6 +186,36 @@ button:
             call.set_brightness(0.08);
             call.perform();
 
+  - platform: template
+    id: capture_mode_toggle
+    name: "Toggle RF Capture All Frames"
+    icon: mdi:record-rec
+    on_press:
+      then:
+        - lambda: |-
+            bool enabled = !r10rf_capture_all_enabled();
+            r10rf_capture_all_enable(enabled);
+            id(capture_mode_active).publish_state(enabled);
+            ESP_LOGI("main", "Capture all frames: %s", enabled ? "ENABLED" : "DISABLED");
+
+  - platform: template
+    id: capture_log_clear
+    name: "Clear RF Capture Log"
+    icon: mdi:delete-clock
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_capture_all_enable(false);
+            r10rf_capture_all_enable(true);  // Re-enable to reset log
+            id(capture_mode_active).publish_state(true);
+            id(capture_log_count).publish_state(0);
+            for (int i = 0; i < 5; i++) {
+              char id_str[32];
+              snprintf(id_str, sizeof(id_str), "capture_log_%d", i);
+              auto *ts = App.get_text_sensor(id_str);
+              if (ts) ts->publish_state("");
+            }
+
 interval:
   - interval: 50ms
     then:
@@ -173,6 +240,21 @@ interval:
           id(pir_motion).publish_state(r10rf_pir_is_latched());
           id(any_alarm).publish_state(r10rf_alarm_is_latched() || r10rf_pir_is_latched());
 
+          // Capture mode status
+          id(capture_mode_active).publish_state(r10rf_capture_all_enabled());
+          id(capture_log_count).publish_state(r10rf_capture_log_count());
+
+          // Update capture log text sensors (newest first)
+          for (int i = 0; i < 5; i++) {
+            const char *entry = r10rf_capture_log_get(i);
+            char id_str[32];
+            snprintf(id_str, sizeof(id_str), "capture_log_%d", i);
+            auto *ts = App.get_text_sensor(id_str);
+            if (ts) {
+              ts->publish_state(entry ? entry : "");
+            }
+          }
+
   - interval: 500ms
     then:
       - lambda: |-
@@ -186,6 +268,9 @@ interval:
             call.set_brightness(led_flash ? 1.0 : 0.0);
           } else if (r10rf_pir_is_latched()) {
             call.set_rgb(1.0, 0.5, 0.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else if (r10rf_capture_all_enabled()) {
+            call.set_rgb(0.0, 0.0, 1.0);
             call.set_brightness(led_flash ? 1.0 : 0.0);
           } else {
             call.set_rgb(0.0, 1.0, 0.0);

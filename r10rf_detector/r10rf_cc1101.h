@@ -6,7 +6,7 @@
 #include <string.h>
 
 // =====================================================
-// Red R10RF CC1101 receive only detector + optional PIR
+// Red R10RF CC1101 receive only detector + optional PIR + full frame capture
 //
 // ESP32 S3 WROOM
 // CC1101 pins:
@@ -58,6 +58,10 @@ static constexpr uint8_t MAX_KNOWN_CODES = 16;
 static constexpr uint8_t MAX_CODE_LEN = 32;
 static constexpr uint8_t FRAME_TEXT_LEN = 64;
 
+// Capture log settings
+static constexpr uint8_t MAX_CAPTURE_LOG = 20;
+static constexpr uint8_t CAPTURE_LOG_LEN = 80;
+
 static volatile uint32_t edge_time[MAX_EDGES];
 static volatile uint8_t edge_level[MAX_EDGES];
 static volatile uint16_t edge_count = 0;
@@ -76,6 +80,12 @@ static int last_rssi = -120;
 static char last_frame[FRAME_TEXT_LEN] = "";
 static char last_raw_frame[FRAME_TEXT_LEN] = "";
 static char last_unknown_frame[FRAME_TEXT_LEN] = "";
+
+// Full frame capture log (circular buffer)
+static char capture_log[MAX_CAPTURE_LOG][CAPTURE_LOG_LEN];
+static uint8_t capture_log_head = 0;
+static uint8_t capture_log_count = 0;
+static bool capture_all_frames = false;
 
 // PIR state
 static bool pir_last_state = false;
@@ -241,6 +251,26 @@ static void r10rf_store_unknown_frame(const char *hex) {
   unknown_frame_seen = true;
 }
 
+// Add frame to circular capture log with timestamp
+static void r10rf_log_capture(const char *hex, bool is_alarm, bool is_unknown) {
+  if (!capture_all_frames) return;
+  if (hex == nullptr || hex[0] == '\0') return;
+
+  char log_entry[CAPTURE_LOG_LEN];
+  uint32_t now_ms = millis();
+  uint32_t secs = now_ms / 1000;
+  uint32_t ms = now_ms % 1000;
+
+  char type_char = is_alarm ? 'A' : (is_unknown ? 'U' : 'R');
+  snprintf(log_entry, sizeof(log_entry), "[%lu.%03lu] %c %s", secs, ms, type_char, hex);
+
+  strncpy(capture_log[capture_log_head], log_entry, CAPTURE_LOG_LEN - 1);
+  capture_log[capture_log_head][CAPTURE_LOG_LEN - 1] = '\0';
+
+  capture_log_head = (capture_log_head + 1) % MAX_CAPTURE_LOG;
+  if (capture_log_count < MAX_CAPTURE_LOG) capture_log_count++;
+}
+
 static bool r10rf_process_frame_bits(const char *frame_bits) {
   char normal_hex[FRAME_TEXT_LEN];
   char inverted_hex[FRAME_TEXT_LEN];
@@ -250,19 +280,25 @@ static bool r10rf_process_frame_bits(const char *frame_bits) {
 
   r10rf_store_raw_frame(normal_hex);
 
+  bool is_alarm = false;
   if (r10rf_is_alarm_frame(normal_hex)) {
     strncpy(last_frame, normal_hex, sizeof(last_frame) - 1);
     last_frame[sizeof(last_frame) - 1] = '\0';
+    is_alarm = true;
+    r10rf_log_capture(normal_hex, true, false);
     return true;
   }
 
   if (r10rf_is_alarm_frame(inverted_hex)) {
     strncpy(last_frame, inverted_hex, sizeof(last_frame) - 1);
     last_frame[sizeof(last_frame) - 1] = '\0';
+    is_alarm = true;
+    r10rf_log_capture(inverted_hex, true, false);
     return true;
   }
 
   r10rf_store_unknown_frame(normal_hex);
+  r10rf_log_capture(normal_hex, false, true);
   return false;
 }
 
@@ -287,7 +323,10 @@ static bool r10rf_decode_edges(uint32_t *times, uint8_t *levels, uint16_t count)
         }
 
         frame_open = false;
-        frame_bit_count = 0      continue;
+        frame_bit_count = 0;
+      }
+
+      continue;
     }
 
     uint8_t run_bits = r10rf_duration_to_bits(dt);
@@ -313,6 +352,13 @@ static bool r10rf_decode_edges(uint32_t *times, uint8_t *levels, uint16_t count)
     if (r10rf_process_frame_bits(frame_bits)) {
       found_alarm = true;
     }
+  }
+
+  // Log non-alarm frames too if capture_all is enabled
+  if (capture_all_frames && frame_open && frame_bit_count > 0 && !found_alarm) {
+    char normal_hex[FRAME_TEXT_LEN];
+    r10rf_bits_to_hex(frame_bits, normal_hex, sizeof(normal_hex), false);
+    r10rf_log_capture(normal_hex, false, false);
   }
 
   return found_alarm;
@@ -384,6 +430,32 @@ static inline void r10rf_pir_clear_motion() {
   pir_last_state = false;
 }
 
+// Capture mode control
+void r10rf_capture_all_enable(bool enable) {
+  capture_all_frames = enable;
+  if (enable) {
+    capture_log_head = 0;
+    capture_log_count = 0;
+    for (uint8_t i = 0; i < MAX_CAPTURE_LOG; i++) {
+      capture_log[i][0] = '\0';
+    }
+  }
+}
+
+bool r10rf_capture_all_enabled() {
+  return capture_all_frames;
+}
+
+uint8_t r10rf_capture_log_count() {
+  return capture_log_count;
+}
+
+const char *r10rf_capture_log_get(uint8_t index) {
+  if (index >= capture_log_count) return nullptr;
+  uint8_t idx = (capture_log_head + index) % MAX_CAPTURE_LOG;
+  return capture_log[idx];
+}
+
 void r10rf_setup() {
   pinMode(PIN_GDO0, INPUT);
   pinMode(PIN_GDO2, INPUT);
@@ -405,6 +477,14 @@ void r10rf_setup() {
   pir_last_state = digitalRead(PIR_PIN);
   pir_latched = false;
   pir_last_change_ms = millis();
+
+  // Initialize capture log
+  capture_all_frames = false;
+  capture_log_head = 0;
+  capture_log_count = 0;
+  for (uint8_t i = 0; i < MAX_CAPTURE_LOG; i++) {
+    capture_log[i][0] = '\0';
+  }
 }
 
 // =====================================================
