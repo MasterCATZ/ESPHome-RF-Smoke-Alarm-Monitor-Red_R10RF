@@ -2,6 +2,13 @@ substitutions:
   # Comma separated list of known alarm frame fragments.
   # Add additional discovered codes here, for example: "5ba9ce8a,b12cd34e,cafe1234"
   r10rf_known_codes: "5ba9ce8a,aaaa5ba9ce8a,aaaa5ba9c,aaa96ea7,5554b7538,5555a4563175"
+  # Optional hardwired PIR motion sensor
+  # Set to GPIO pin number (e.g., "4") or empty to disable
+  pir_gpio: "4"
+  # PIR off-delay in seconds (motion stays ON this long after PIR goes low)
+  pir_off_delay: "5"
+  # PIR on-delay in milliseconds (debounce)
+  pir_on_delay: "100"
 
 esphome:
   name: smokealarmrfdetector-c1101
@@ -48,10 +55,27 @@ wifi:
 captive_portal:
 
 binary_sensor:
+  # RF Smoke Alarm (latched until acknowledged)
   - platform: template
     id: r10rf_alarm
     name: "R10RF Smoke Alarm RF"
     device_class: smoke
+
+  # Optional Hardwired PIR Motion Sensor
+  - platform: template
+    id: pir_motion
+    name: "PIR Motion Sensor"
+    device_class: motion
+    lambda: |-
+      return r10rf_pir_is_latched();
+
+  # Combined: Any alarm trigger (RF smoke OR PIR motion)
+  - platform: template
+    id: any_alarm
+    name: "Any Alarm Triggered"
+    device_class: safety
+    lambda: |-
+      return r10rf_alarm_is_latched() || r10rf_pir_is_latched();
 
 sensor:
   - platform: template
@@ -98,6 +122,33 @@ button:
             call.set_brightness(0.08);
             call.perform();
 
+  - platform: template
+    id: pir_acknowledge
+    name: "Acknowledge PIR Motion"
+    icon: mdi:motion-sensor-off
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_pir_acknowledge();
+            id(pir_motion).publish_state(false);
+
+  - platform: template
+    id: any_acknowledge
+    name: "Acknowledge All Alarms"
+    icon: mdi:shield-check
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_acknowledge_alarm();
+            r10rf_pir_acknowledge();
+            id(r10rf_alarm).publish_state(false);
+            id(pir_motion).publish_state(false);
+            id(any_alarm).publish_state(false);
+            auto call = id(r10rf_status_led).turn_on();
+            call.set_rgb(0.0, 1.0, 0.0);
+            call.set_brightness(0.08);
+            call.perform();
+
 interval:
   - interval: 50ms
     then:
@@ -117,8 +168,10 @@ interval:
             r10rf_clear_alarm();
           }
 
-          // The binary sensor is latched in C++ until the acknowledge button is pressed.
+          // The binary sensors are latched in C++ until the acknowledge button is pressed.
           id(r10rf_alarm).publish_state(r10rf_alarm_is_latched());
+          id(pir_motion).publish_state(r10rf_pir_is_latched());
+          id(any_alarm).publish_state(r10rf_alarm_is_latched() || r10rf_pir_is_latched());
 
   - interval: 500ms
     then:
@@ -130,6 +183,9 @@ interval:
 
           if (r10rf_alarm_is_latched()) {
             call.set_rgb(1.0, 0.0, 0.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else if (r10rf_pir_is_latched()) {
+            call.set_rgb(1.0, 0.5, 0.0);
             call.set_brightness(led_flash ? 1.0 : 0.0);
           } else {
             call.set_rgb(0.0, 1.0, 0.0);

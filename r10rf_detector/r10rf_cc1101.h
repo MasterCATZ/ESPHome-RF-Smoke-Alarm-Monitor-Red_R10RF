@@ -1,11 +1,12 @@
 #pragma once
 
 #include <Arduino.h>
+#include <stdint.h>
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 #include <string.h>
 
 // =====================================================
-// Red R10RF CC1101 receive only detector
+// Red R10RF CC1101 receive only detector + optional PIR
 //
 // ESP32 S3 WROOM
 // CC1101 pins:
@@ -15,15 +16,8 @@
 //   CS   18
 //   GDO0 7   raw serial data
 //   GDO2 6   carrier sense
-//
-// Detected signal:
-//   433.92 MHz
-//   2 FSK
-//   9.6 kBaud
-//   common observed alarm frame core: aaaa5ba9ce8a
-//
-// Known alarm frame fragments are supplied by ESPHome YAML:
-//   r10rf_set_known_codes("5ba9ce8a,aaaa5ba9ce8a,...");
+// PIR pin (optional):
+//   GPIO 4  (configurable via PIR_PIN)
 // =====================================================
 
 #define CC1101_IOCFG0 0x02
@@ -38,6 +32,11 @@ static constexpr int PIN_MOSI = 17;
 static constexpr int PIN_CS   = 18;
 static constexpr int PIN_GDO0 = 7;
 static constexpr int PIN_GDO2 = 6;
+
+// PIR pin - can be overridden by defining PIR_PIN before include
+#ifndef PIR_PIN
+#define PIR_PIN 4
+#endif
 
 static constexpr float RF_FREQ      = 433.92;
 static constexpr float RF_DATARATE  = 9.6;
@@ -77,6 +76,11 @@ static int last_rssi = -120;
 static char last_frame[FRAME_TEXT_LEN] = "";
 static char last_raw_frame[FRAME_TEXT_LEN] = "";
 static char last_unknown_frame[FRAME_TEXT_LEN] = "";
+
+// PIR state
+static bool pir_last_state = false;
+static bool pir_latched = false;
+static uint32_t pir_last_change_ms = 0;
 
 static char known_codes[MAX_KNOWN_CODES][MAX_CODE_LEN];
 static uint8_t known_code_count = 0;
@@ -283,10 +287,7 @@ static bool r10rf_decode_edges(uint32_t *times, uint8_t *levels, uint16_t count)
         }
 
         frame_open = false;
-        frame_bit_count = 0;
-      }
-
-      continue;
+        frame_bit_count = 0      continue;
     }
 
     uint8_t run_bits = r10rf_duration_to_bits(dt);
@@ -362,9 +363,31 @@ static void r10rf_configure_radio() {
   ELECHOUSE_cc1101.SetRx();
 }
 
+// PIR helper functions
+static inline bool r10rf_pir_read() {
+  return digitalRead(PIR_PIN);
+}
+
+static inline bool r10rf_pir_has_motion() {
+  return pir_last_state;
+}
+
+static inline bool r10rf_pir_is_latched() {
+  return pir_latched;
+}
+
+static inline void r10rf_pir_acknowledge() {
+  pir_latched = false;
+}
+
+static inline void r10rf_pir_clear_motion() {
+  pir_last_state = false;
+}
+
 void r10rf_setup() {
   pinMode(PIN_GDO0, INPUT);
   pinMode(PIN_GDO2, INPUT);
+  pinMode(PIR_PIN, INPUT);
 
   r10rf_configure_radio();
 
@@ -377,6 +400,11 @@ void r10rf_setup() {
   capture_had_carrier = false;
   capture_start_us = micros();
   last_carrier_change_us = micros();
+
+  // Initialize PIR state
+  pir_last_state = digitalRead(PIR_PIN);
+  pir_latched = false;
+  pir_last_change_ms = millis();
 }
 
 // =====================================================
@@ -385,6 +413,7 @@ void r10rf_setup() {
 
 void r10rf_loop() {
   uint32_t now = micros();
+  uint32_t now_ms = millis();
 
   bool should_process = false;
 
@@ -403,6 +432,16 @@ void r10rf_loop() {
   if ((had_carrier && !active && since_carrier_change > TRAIN_END_US && count >= MIN_EDGES_TO_PROCESS) ||
       (timed_out && count >= MIN_EDGES_TO_PROCESS)) {
     should_process = true;
+  }
+
+  // PIR polling (non-interrupt, 50ms interval is fine)
+  bool pir_now = r10rf_pir_read();
+  if (pir_now != pir_last_state) {
+    pir_last_state = pir_now;
+    pir_last_change_ms = now_ms;
+    if (pir_now) {
+      pir_latched = true;
+    }
   }
 
   if (!should_process) {
