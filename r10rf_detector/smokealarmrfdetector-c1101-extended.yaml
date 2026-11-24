@@ -1,0 +1,534 @@
+substitutions:
+  # ============================
+  # RF SMOKE ALARM SETTINGS
+  # ============================
+  # Comma separated list of known alarm frame fragments.
+  # Add additional discovered codes here, for example: "5ba9ce8a,b12cd34e,cafe1234"
+  r10rf_known_codes: "5ba9ce8a,aaaa5ba9ce8a,aaaa5ba9c,aaa96ea7,5554b7538,5555a4563175"
+
+  # Optional hardwired PIR motion sensor
+  # Set to GPIO pin number (e.g., "8") or empty to disable
+  pir_gpio: "8"
+  # PIR off-delay in seconds (motion stays ON this long after PIR goes low)
+  pir_off_delay: "5"
+  # PIR on-delay in milliseconds (debounce)
+  pir_on_delay: "100"
+
+  # Full frame capture mode (logs ALL decoded frames with timestamps)
+  # Enable via button in HA, or set to "true" to start capturing on boot
+  capture_all_frames: "false"
+
+  # ============================
+  # CC1101 PIN MAPPING (VSPI + HSPI)
+  # ============================
+  # CC1101 #1 - RX Only (VSPI - default SPI)
+  cc1101_rx_sck: "15"
+  cc1101_rx_miso: "16"
+  cc1101_rx_mosi: "17"
+  cc1101_rx_csn: "18"
+  cc1101_rx_gdo0: "7"
+  cc1101_rx_gdo2: "6"
+
+  # CC1101 #2 - TX Capable (HSPI)
+  cc1101_tx_sck: "14"
+  cc1101_tx_miso: "12"
+  cc1101_tx_mosi: "13"
+  cc1101_tx_csn: "15"
+  cc1101_tx_gdo0: "5"
+  cc1101_tx_gdo2: "4"
+
+  # ============================
+  # I2C BUS (Environmental Sensors)
+  # ============================
+  i2c_sda: "21"
+  i2c_scl: "47"
+
+  # ============================
+  # UART (PM Sensor)
+  # ============================
+  uart_rx_pin: "10"
+  uart_tx_pin: "11"
+
+  # ============================
+  # SENSOR ENABLE FLAGS (set to "true" to enable)
+  # ============================
+  enable_bme280: "true"
+  enable_sgp40: "true"
+  enable_pms5003: "true"
+  enable_amg8833: "true"
+  enable_mlx90614: "true"
+  enable_veml7700: "true"
+  enable_ltr390: "true"
+
+esphome:
+  name: smokealarmrfdetector-c1101
+  friendly_name: Smoke Alarm RF Detector + Environmental
+  includes:
+    - r10rf_cc1101.h
+  libraries:
+    - SPI
+    - SmartRC-CC1101-Driver-Lib=https://github.com/LSatan/SmartRC-CC1101-Driver-Lib.git
+  on_boot:
+    priority: 600
+    then:
+      - lambda: |-
+          r10rf_set_known_codes("${r10rf_known_codes}");
+          r10rf_setup();
+          r10rf_capture_all_enable(${capture_all_frames});
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Optional fallback access point. Uncomment if desired.
+  # ap:
+  #   ssid: "Smoke Alarm RF Fallback"
+  #   password: !secret fallback_ap_password
+
+captive_portal:
+
+# ============================
+# I2C BUS
+# ============================
+i2c:
+  sda: GPIO${i2c_sda}
+  scl: GPIO${i2c_scl}
+  scan: true
+  id: bus_a
+
+# ============================
+# UART FOR PM SENSOR
+# ============================
+uart:
+  id: pms_uart
+  rx_pin: GPIO${uart_rx_pin}
+  tx_pin: GPIO${uart_tx_pin}
+  baud_rate: 9600
+
+# ============================
+# BINARY SENSORS
+# ============================
+binary_sensor:
+  # RF Smoke Alarm (latched until acknowledged)
+  - platform: template
+    id: r10rf_alarm
+    name: "R10RF Smoke Alarm RF"
+    device_class: smoke
+
+  # Optional Hardwired PIR Motion Sensor
+  - platform: template
+    id: pir_motion
+    name: "PIR Motion Sensor"
+    device_class: motion
+    lambda: |-
+      return r10rf_pir_is_latched();
+
+  # Combined: Any alarm trigger (RF smoke OR PIR motion)
+  - platform: template
+    id: any_alarm
+    name: "Any Alarm Triggered"
+    device_class: safety
+    lambda: |-
+      return r10rf_alarm_is_latched() || r10rf_pir_is_latched();
+
+  # Capture all frames mode status
+  - platform: template
+    id: capture_mode_active
+    name: "RF Capture All Frames Active"
+    device_class: running
+    lambda: |-
+      return r10rf_capture_all_enabled();
+
+# ============================
+# SENSORS
+# ============================
+sensor:
+  # RF RSSI
+  - platform: template
+    id: r10rf_rssi
+    name: "R10RF CC1101 RSSI"
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+
+  # Capture log count
+  - platform: template
+    id: capture_log_count
+    name: "RF Capture Log Entries"
+    unit_of_measurement: "frames"
+    accuracy_decimals: 0
+    lambda: |-
+      return r10rf_capture_log_count();
+
+  # ---------- BME280: Temp/Humidity/Pressure ----------
+  - platform: bme280
+    i2c_id: bus_a
+    address: 0x76
+    iir_filter: 16x
+    oversampling: 16x
+    temperature:
+      name: "Environment Temperature"
+      id: env_temperature
+      oversampling: 16x
+      accuracy_decimals: 1
+    humidity:
+      name: "Environment Humidity"
+      id: env_humidity
+      oversampling: 16x
+      accuracy_decimals: 1
+    pressure:
+      name: "Environment Pressure"
+      id: env_pressure
+      oversampling: 16x
+      accuracy_decimals: 1
+    update_interval: 10s
+
+  # ---------- SGP40: VOC Index (Air Quality) ----------
+  - platform: sgp40
+    i2c_id: bus_a
+    address: 0x59
+    name: "VOC Index"
+    id: voc_index
+    algorithm: voc
+    temperature_sensor: env_temperature
+    humidity_sensor: env_humidity
+    update_interval: 10s
+    baseline: 0x8973
+
+  # ---------- PMS5003: Particulate Matter ----------
+  - platform: pmsx003
+    uart_id: pms_uart
+    type: PMSX003
+    pm_1_0:
+      name: "PM1.0"
+      id: pm10
+      accuracy_decimals: 1
+    pm_2_5:
+      name: "PM2.5"
+      id: pm25
+      accuracy_decimals: 1
+    pm_10_0:
+      name: "PM10.0"
+      id: pm100
+      accuracy_decimals: 1
+    update_interval: 30s
+
+  # ---------- AMG8833: 8x8 Thermal Grid ----------
+  - platform: amg88xx
+    i2c_id: bus_a
+    address: 0x69
+    name: "Thermal Grid"
+    id: thermal_grid
+    update_interval: 5s
+
+  # ---------- MLX90614: IR Thermometer ----------
+  - platform: mlx90614
+    i2c_id: bus_a
+    address: 0x5A
+    name: "IR Temperature"
+    object:
+      name: "IR Object Temperature"
+      id: ir_object_temp
+      accuracy_decimals: 1
+    ambient:
+      name: "IR Ambient Temperature"
+      id: ir_ambient_temp
+      accuracy_decimals: 1
+    update_interval: 5s
+
+  # ---------- VEML7700: Ambient Light ----------
+  - platform: veml7700
+    i2c_id: bus_a
+    address: 0x10
+    name: "Ambient Light"
+    id: ambient_light
+    gain: 1/8
+    integration_time: 800ms
+    update_interval: 10s
+
+  # ---------- LTR390: UV Index ----------
+  - platform: ltr390
+    i2c_id: bus_a
+    address: 0x53
+    name: "UV Index"
+    id: uv_index
+    gain: 3x
+    integration_time: 400ms
+    measurement_rate: 200ms
+    update_interval: 10s
+
+  # ---------- Derived: Heat Index ----------
+  - platform: template
+    name: "Heat Index"
+    id: heat_index
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      if (isnan(id(env_temperature).state) || isnan(id(env_humidity).state)) return NAN;
+      float T = id(env_temperature).state;
+      float RH = id(env_humidity).state;
+      float HI = T + 0.33 * (6.105 * exp(17.27 * T / (237.7 + T)) * RH / 100) - 0.7 * 0 - 4.0;
+      return HI;
+    update_interval: 30s
+
+  # ---------- Derived: Dew Point ----------
+  - platform: template
+    name: "Dew Point"
+    id: dew_point
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      if (isnan(id(env_temperature).state) || isnan(id(env_humidity).state)) return NAN;
+      float T = id(env_temperature).state;
+      float RH = id(env_humidity).state;
+      float a = 17.27;
+      float b = 237.7;
+      float alpha = (a * T) / (b + T) + log(RH / 100.0);
+      return (b * alpha) / (a - alpha);
+    update_interval: 30s
+
+text_sensor:
+  # RF Frame Capture
+  - platform: template
+    id: r10rf_last_frame
+    name: "R10RF Last Matched Frame"
+
+  - platform: template
+    id: r10rf_last_raw_frame
+    name: "R10RF Last Raw Frame"
+
+  - platform: template
+    id: r10rf_last_unknown_frame
+    name: "R10RF Last Unknown Frame"
+
+  # Capture log entries (newest first)
+  - platform: template
+    id: capture_log_0
+    name: "RF Capture Log [0] Newest"
+  - platform: template
+    id: capture_log_1
+    name: "RF Capture Log [1]"
+  - platform: template
+    id: capture_log_2
+    name: "RF Capture Log [2]"
+  - platform: template
+    id: capture_log_3
+    name: "RF Capture Log [3]"
+  - platform: template
+    id: capture_log_4
+    name: "RF Capture Log [4]"
+
+  # Thermal grid as JSON text (for HA dashboard)
+  - platform: template
+    id: thermal_grid_json
+    name: "Thermal Grid JSON"
+    lambda: |-
+      std::string json = "[";
+      for (int y = 0; y < 8; y++) {
+        json += "[";
+        for (int x = 0; x < 8; x++) {
+          json += "0";
+          if (x < 7) json += ",";
+        }
+        json += "]";
+        if (y < 7) json += ",";
+      }
+      json += "]";
+      return json;
+    update_interval: 5s
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: r10rf_status_led
+    name: "R10RF Status LED"
+    pin: GPIO48
+    num_leds: 1
+    chipset: WS2812
+    rgb_order: GRB
+    internal: true
+
+button:
+  - platform: template
+    id: r10rf_acknowledge
+    name: "Acknowledge R10RF Alarm"
+    icon: mdi:check-circle
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_acknowledge_alarm();
+            id(r10rf_alarm).publish_state(false);
+            auto call = id(r10rf_status_led).turn_on();
+            call.set_rgb(0.0, 1.0, 0.0);
+            call.set_brightness(0.08);
+            call.perform();
+
+  - platform: template
+    id: pir_acknowledge
+    name: "Acknowledge PIR Motion"
+    icon: mdi:motion-sensor-off
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_pir_acknowledge();
+            id(pir_motion).publish_state(false);
+
+  - platform: template
+    id: any_acknowledge
+    name: "Acknowledge All Alarms"
+    icon: mdi:shield-check
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_acknowledge_alarm();
+            r10rf_pir_acknowledge();
+            id(r10rf_alarm).publish_state(false);
+            id(pir_motion).publish_state(false);
+            id(any_alarm).publish_state(false);
+            auto call = id(r10rf_status_led).turn_on();
+            call.set_rgb(0.0, 1.0, 0.0);
+            call.set_brightness(0.08);
+            call.perform();
+
+  - platform: template
+    id: capture_mode_toggle
+    name: "Toggle RF Capture All Frames"
+    icon: mdi:record-rec
+    on_press:
+      then:
+        - lambda: |-
+            bool enabled = !r10rf_capture_all_enabled();
+            r10rf_capture_all_enable(enabled);
+            id(capture_mode_active).publish_state(enabled);
+            ESP_LOGI("main", "Capture all frames: %s", enabled ? "ENABLED" : "DISABLED");
+
+  - platform: template
+    id: capture_log_clear
+    name: "Clear RF Capture Log"
+    icon: mdi:delete-clock
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_capture_all_enable(false);
+            r10rf_capture_all_enable(true);
+            id(capture_mode_active).publish_state(true);
+            id(capture_log_count).publish_state(0);
+            for (int i = 0; i < 5; i++) {
+              char id_str[32];
+              snprintf(id_str, sizeof(id_str), "capture_log_%d", i);
+              auto *ts = App.get_text_sensor(id_str);
+              if (ts) ts->publish_state("");
+            }
+
+  # SGP40 baseline save
+  - platform: template
+    id: sgp40_baseline_save
+    name: "Save SGP40 Baseline"
+    icon: mdi:database-plus
+    on_press:
+      then:
+        - lambda: |-
+          uint16_t baseline = id(voc_index).get_baseline();
+          ESP_LOGI("sgp40", "VOC baseline: 0x%04X", baseline);
+
+interval:
+  # Fast loop: RF + PIR + Capture log (50ms)
+  - interval: 50ms
+    then:
+      - lambda: |-
+          r10rf_loop();
+
+          id(r10rf_last_raw_frame).publish_state(r10rf_get_last_raw_frame());
+
+          if (r10rf_has_unknown_frame()) {
+            id(r10rf_last_unknown_frame).publish_state(r10rf_get_last_unknown_frame());
+            r10rf_clear_unknown_frame();
+          }
+
+          if (r10rf_has_alarm()) {
+            id(r10rf_last_frame).publish_state(r10rf_get_last_frame());
+            id(r10rf_rssi).publish_state(r10rf_last_rssi());
+            r10rf_clear_alarm();
+          }
+
+          id(r10rf_alarm).publish_state(r10rf_alarm_is_latched());
+          id(pir_motion).publish_state(r10rf_pir_is_latched());
+          id(any_alarm).publish_state(r10rf_alarm_is_latched() || r10rf_pir_is_latched());
+
+          id(capture_mode_active).publish_state(r10rf_capture_all_enabled());
+          id(capture_log_count).publish_state(r10rf_capture_log_count());
+
+          for (int i = 0; i < 5; i++) {
+            const char *entry = r10rf_capture_log_get(i);
+            char id_str[32];
+            snprintf(id_str, sizeof(id_str), "capture_log_%d", i);
+            auto *ts = App.get_text_sensor(id_str);
+            if (ts) {
+              ts->publish_state(entry ? entry : "");
+            }
+          }
+
+  # Medium loop: Environmental sensors status (5s)
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (!id(env_temperature).has_state()) ESP_LOGW("env", "BME280 temp missing");
+          if (!id(voc_index).has_state()) ESP_LOGW("env", "SGP40 VOC missing");
+          if (!id(pm25).has_state()) ESP_LOGW("env", "PMS5003 missing");
+
+  # Slow loop: LED status (500ms)
+  - interval: 500ms
+    then:
+      - lambda: |-
+          static bool led_flash = false;
+          led_flash = !led_flash;
+
+          auto call = id(r10rf_status_led).turn_on();
+
+          if (r10rf_alarm_is_latched()) {
+            call.set_rgb(1.0, 0.0, 0.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else if (r10rf_pir_is_latched()) {
+            call.set_rgb(1.0, 0.5, 0.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else if (r10rf_capture_all_enabled()) {
+            call.set_rgb(0.0, 0.0, 1.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else if (!id(env_temperature).has_state()) {
+            call.set_rgb(1.0, 0.0, 1.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else {
+            call.set_rgb(0.0, 1.0, 0.0);
+            call.set_brightness(0.08);
+          }
+
+          call.perform();
+
+# ============================
+# TIME (for timestamped logs)
+# ============================
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# ============================
+# WEB SERVER (for local config)
+# ============================
+web_server:
+  port: 80
